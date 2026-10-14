@@ -1,0 +1,6 @@
+data/
+out/
+*.bag
+__pycache__/
+*.pyc
+.venv/
