@@ -1,5 +1,6 @@
 import numpy as np
 import cv2
+import matplotlib.pyplot as plt
 from pathlib import Path
 from rosbags.highlevel import AnyReader
 
@@ -14,13 +15,27 @@ def quat_R(w, x, y, z):
                      [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
                      [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
 
+def draw_polygons(img):
+    plt.figure(figsize=(12, 8))
+    plt.imshow(img)
+    plt.title('click a trunk outline, Enter closes it; Enter with no clicks finishes')
+    mask = np.zeros(img.shape[:2], np.uint8)
+    uv = np.array(plt.ginput(n=-1, timeout=0))
+    while len(uv) >= 3:
+        cv2.fillPoly(mask, [np.round(uv).astype(np.int32)], int(mask.max()) + 1)
+        plt.fill(uv[:, 0], uv[:, 1], alpha=0.3)
+        uv = np.array(plt.ginput(n=-1, timeout=0))
+    plt.close()
+    return mask
+
 def stamp(m):
     return m.header.stamp.sec + 1e-9 * m.header.stamp.nanosec
 
-t_img, cam, tf, img = [], {}, [], {}
+t_img, t_cloud, cloud, cam, tf, img = [], [], [], {}, [], {}
 with AnyReader([BAG]) as rd:
     con = {c.topic: c for c in rd.connections}
-    topics = ['/nerian/left/image_raw', '/nerian/left/camera_info', '/nerian/right/camera_info', '/tf_static']
+    topics = ['/nerian/left/image_raw', '/nerian/left/camera_info', '/nerian/right/camera_info',
+              '/os1_cloud_node/points', '/tf_static']
     for c, t, raw in rd.messages(connections=[con[name] for name in topics]):
         m = rd.deserialize(raw, c.msgtype)
         if c.topic == '/tf_static':
@@ -29,6 +44,9 @@ with AnyReader([BAG]) as rd:
                 tf.append((x.header.frame_id, x.child_frame_id, quat_R(q.w, q.x, q.y, q.z), np.array([p.x, p.y, p.z])))
         elif 'camera_info' in c.topic:
             cam.setdefault(c.topic.split('/')[2], (np.array(m.K).reshape(3, 3), np.array(m.D).reshape(1, -1)))
+        elif c.topic == '/os1_cloud_node/points':
+            t_cloud.append(stamp(m))
+            cloud.append(bytes(m.data))
         else:
             t_img.append(stamp(m))
     want = [t_img[i] for i in FRAMES]
@@ -70,9 +88,21 @@ for i, st in zip(FRAMES, want):
     ok = (disp > 0) & (d_back > 0) & (np.abs(disp - d_back) <= tol_lr)
     disp[~ok] = np.nan
 
-    print('frame %d  LR-valid %.1f %%' % (i, 100 * ok.mean()))
+    if not (d / 'mask.png').exists():
+        cv2.imwrite(str(d / 'mask.png'), draw_polygons(L))
+    mask = cv2.imread(str(d / 'mask.png'), cv2.IMREAD_UNCHANGED)
+    for k in range(1, mask.max() + 1):
+        m_k = mask == k
+        d_med = np.nanmedian(disp[m_k])
+        print('frame %d  object %d  pixels %d  disp %.2f px  Z %.2f m' % (i, k, m_k.sum(), d_med, f_x * B / d_med))
+
+    j = np.argmin(np.abs(np.array(t_cloud) - st))
+    pts_lidar = np.frombuffer(cloud[j], np.float32).reshape(-1, 12)[:, :3]  # 48 bytes per point, x y z first
+    pts_lidar = pts_lidar[np.linalg.norm(pts_lidar, axis=1) > 0.5]  # (N, 3) in os1_lidar
+    print('frame %d  LR-valid %.1f %%  cloud dt %+.1f ms' % (i, 100 * ok.mean(), 1e3 * (t_cloud[j] - st)))
     cv2.imwrite(str(d / 'left_rect.png'), cv2.cvtColor(L, cv2.COLOR_RGB2BGR))
     np.save(d / 'disp.npy', disp)
+    np.save(d / 'pts_lidar.npy', pts_lidar)
     # R1 rotates the raw left optical frame into the rectified left frame
-    np.savez(d / 'calib.npz', f_x=f_x, c_x=c_x, c_y=c_y, B=B, R1=R1, stamp=st)
+    np.savez(d / 'calib.npz', f_x=f_x, c_x=c_x, c_y=c_y, B=B, R1=R1, stamp=st, dt_cloud=t_cloud[j] - st)
     np.savetxt(d / 'tf_static.txt', np.array([(p, c, *R.ravel(), *t) for p, c, R, t in tf], dtype=object), fmt='%s')
