@@ -1,4 +1,5 @@
 data/
+frames/
 out/
 *.bag
 __pycache__/
