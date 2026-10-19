@@ -26,7 +26,8 @@ def intrinsics(name):
                   [0, p.getNode('fy').real(), p.getNode('cy').real()],
                   [0, 0, 1]])
     D = np.array([[k.getNode(n).real() for n in ('k1', 'k2', 'p1', 'p2')]])
-    return K, D
+    # 1920x1200 calibration, halved for the 960x600 bag images
+    return np.diag([0.5, 0.5, 1]) @ K, D
 
 def draw_polygons(img):
     plt.figure(figsize=(12, 8))
@@ -63,8 +64,8 @@ with AnyReader([BAG]) as rd:
         elif stamp(m) in want:
             img[(c.topic.split('/')[2], stamp(m))] = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width, 3)
 
-K_l, D_l = intrinsics('dalsa_rgb0_down.yaml')
-K_r, D_r = intrinsics('dalsa_rgb1_down.yaml')
+K_l, D_l = intrinsics('dalsa_rgb0.yaml')
+K_r, D_r = intrinsics('dalsa_rgb1.yaml')
 fs = cv2.FileStorage(CAL + 'extrinsics/calib_chain.yaml', cv2.FILE_STORAGE_READ)
 # T_01 maps rgb1 (right) points into rgb0 (left); T_cl maps Livox points into rgb0
 T_01 = fs.getNode('T_rgb0_rgb1').mat()
