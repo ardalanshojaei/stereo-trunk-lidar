@@ -9,7 +9,7 @@ BAG = Path('data/bgarden/1018_00_VLIO.bag')
 CAL = 'data/bgarden/calib/'
 OUT = Path('frames')
 FRAMES = [48, 208]
-n_d, w_b, tol_lr = 128, 5, 1.0  # SGBM disparities, block size, left-right tolerance [px]
+n_d, w_b, tol_lr = 80, 5, 1.0  # SGBM disparities, block size, left-right tolerance [px]
 wh = (960, 600)
 
 # index headers change field order at byte 1,384,229,779 and rosbags 0.11 caches the old offsets
@@ -45,11 +45,15 @@ def draw_polygons(img):
 def stamp(m):
     return m.header.stamp.sec + 1e-9 * m.header.stamp.nanosec
 
-t_img, img, scan = [], {}, {}
+t_img, odo, img, scan = [], [], {}, {}
 with AnyReader([BAG]) as rd:
     con = {c.topic: c for c in rd.connections}
-    for c, t, raw in rd.messages(connections=[con['/dalsa_color/left/image_raw']]):
-        t_img.append(stamp(rd.deserialize(raw, c.msgtype)))
+    for c, t, raw in rd.messages(connections=[con['/dalsa_color/left/image_raw'], con['/odom']]):
+        m = rd.deserialize(raw, c.msgtype)
+        if c.topic == '/odom':
+            odo.append((stamp(m), m.twist.twist.linear.x, m.twist.twist.angular.z))
+        else:
+            t_img.append(stamp(m))
     want = [t_img[i] for i in FRAMES]
     topics = ['/dalsa_color/left/image_raw', '/dalsa_color/right/image_raw', '/livox/lidar']
     for c, t, raw in rd.messages(connections=[con[name] for name in topics]):
@@ -63,6 +67,7 @@ with AnyReader([BAG]) as rd:
                     scan[s] = np.array([(p.x, p.y, p.z, t_b + 1e-9 * p.offset_time) for p in m.points])
         elif stamp(m) in want:
             img[(c.topic.split('/')[2], stamp(m))] = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width, 3)
+odo = np.array(odo)
 
 K_l, D_l = intrinsics('dalsa_rgb0.yaml')
 K_r, D_r = intrinsics('dalsa_rgb1.yaml')
@@ -97,10 +102,15 @@ for i, st in zip(FRAMES, want):
     ok = (disp > 0) & (d_back > 0) & (np.abs(disp - d_back) <= tol_lr)
     disp[~ok] = np.nan
 
-    # keep the Livox points within 10 ms of the image, the sweep lasts 100 ms
-    p = scan[st][(np.linalg.norm(scan[st][:, :3], axis=1) > 0.5) & (np.abs(scan[st][:, 3] - st) < 0.01)]
-    q = p[:, :3] @ T_cl[:3, :3].T + T_cl[:3, 3]  # (N, 3) raw rgb0 frame
-    pts_cam = q @ R1.T  # (N, 3) rectified left frame
+    p = scan[st][np.linalg.norm(scan[st][:, :3], axis=1) > 0.5]
+    dt = p[:, 3] - st
+    v_x = np.interp(st, odo[:, 0], odo[:, 1])
+    w_z = np.interp(st, odo[:, 0], odo[:, 2])
+    q = p[:, :3] @ T_cl[:3, :3].T + T_cl[:3, 3]  # (N, 3) raw rgb0 frame, each point at its own time
+    # rgb0 frame: odometry speed v_x along Z, yaw rate w_z about -Y, points moved to the image instant
+    X = q[:, 0] - w_z * dt * q[:, 2]
+    Z = q[:, 2] + w_z * dt * q[:, 0] + v_x * dt
+    pts_cam = np.c_[X, q[:, 1], Z] @ R1.T  # (N, 3) rectified left frame at the image stamp
     Z_l = pts_cam[:, 2]
     u_l = np.round(f_x * pts_cam[:, 0] / Z_l + c_x).astype(int)
     v_l = np.round(f_x * pts_cam[:, 1] / Z_l + c_y).astype(int)
