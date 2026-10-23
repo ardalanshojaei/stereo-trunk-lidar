@@ -1,7 +1,9 @@
 data/
 frames/
+runs/
 out/
 *.bag
+*.pt
 __pycache__/
 *.pyc
 .venv/

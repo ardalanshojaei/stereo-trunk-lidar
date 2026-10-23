@@ -4,11 +4,12 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from rosbags.highlevel import AnyReader
 from rosbags.rosbag1 import reader
+from ultralytics import YOLO
 
 BAG = Path('data/bgarden/1018_00_VLIO.bag')
 CAL = 'data/bgarden/calib/'
 OUT = Path('frames')
-FRAMES = [48, 208]
+FRAMES = [24, 48, 72, 120, 144, 168, 192, 208, 228, 248, 300, 324, 348, 372, 396, 420, 444, 912, 940]
 n_d, w_b, tol_lr = 80, 5, 1.0  # SGBM disparities, block size, left-right tolerance [px]
 wh = (960, 600)
 
@@ -87,6 +88,7 @@ print('rectified f_x %.2f  c_x %.2f  c_y %.2f  B %.4f m  fB %.1f px m' % (f_x, c
 sgbm = cv2.StereoSGBM_create(minDisparity=0, numDisparities=n_d, blockSize=w_b, P1=24 * w_b ** 2, P2=96 * w_b ** 2,
                              uniquenessRatio=10, speckleWindowSize=100, speckleRange=2, disp12MaxDiff=-1,
                              mode=cv2.STEREO_SGBM_MODE_HH)
+yolo = YOLO('data/yolo/trunk.pt')
 v, u = np.mgrid[0:wh[1], 0:wh[0]]
 for i, st in zip(FRAMES, want):
     d = OUT / f'{i:04d}'
@@ -120,7 +122,13 @@ for i, st in zip(FRAMES, want):
     if not (d / 'mask_oracle.png').exists():
         cv2.imwrite(str(d / 'mask_oracle.png'), draw_polygons(L[:, :, ::-1]))
     mask_oracle = cv2.imread(str(d / 'mask_oracle.png'), cv2.IMREAD_UNCHANGED)
-    print('%d  LR %.1f %%  Livox %d  stereo/LiDAR Z %.3f  oracle %d'
-          % (i, 100 * ok.mean(), len(p), ratio, mask_oracle.max()))
+    res = yolo.predict(L, imgsz=1024, conf=0.25, retina_masks=True, verbose=False)[0]
+    mask_pred = np.zeros(mask_oracle.shape, np.uint8)
+    if res.masks is not None:
+        for k, m_k in enumerate(res.masks.data.cpu().numpy() > 0.5, 1):
+            mask_pred[m_k & (mask_pred == 0)] = k
+    print('%d  LR %.1f %%  Livox %d  stereo/LiDAR Z %.3f  oracle %d  pred %d'
+          % (i, 100 * ok.mean(), len(p), ratio, mask_oracle.max(), mask_pred.max()))
     cv2.imwrite(str(d / 'left_rect.png'), L)
+    cv2.imwrite(str(d / 'mask_pred.png'), mask_pred)
     np.save(d / 'disp.npy', disp)
