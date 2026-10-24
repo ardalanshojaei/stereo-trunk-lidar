@@ -113,11 +113,9 @@ for i, st in zip(FRAMES, want):
     X = q[:, 0] - w_z * dt * q[:, 2]
     Z = q[:, 2] + w_z * dt * q[:, 0] + v_x * dt
     pts_cam = np.c_[X, q[:, 1], Z] @ R1.T  # (N, 3) rectified left frame at the image stamp
-    Z_l = pts_cam[:, 2]
-    u_l = np.round(f_x * pts_cam[:, 0] / Z_l + c_x).astype(int)
-    v_l = np.round(f_x * pts_cam[:, 1] / Z_l + c_y).astype(int)
-    on = (Z_l > 1) & (u_l >= 0) & (u_l < wh[0]) & (v_l >= 0) & (v_l < wh[1])
-    ratio = np.nanmedian(f_x * B / disp[v_l[on], u_l[on]] / Z_l[on])
+    np.save(d / 'disp.npy', disp)
+    np.save(d / 'pts_cam.npy', pts_cam.astype(np.float32))
+    np.savez(d / 'calib.npz', f_x=f_x, c_x=c_x, c_y=c_y, B=B, w_b=w_b, R1=R1, T_cl=T_cl, stamp=st, v_x=v_x, w_z=w_z)
 
     if not (d / 'mask_oracle.png').exists():
         cv2.imwrite(str(d / 'mask_oracle.png'), draw_polygons(L[:, :, ::-1]))
@@ -127,8 +125,15 @@ for i, st in zip(FRAMES, want):
     if res.masks is not None:
         for k, m_k in enumerate(res.masks.data.cpu().numpy() > 0.5, 1):
             mask_pred[m_k & (mask_pred == 0)] = k
-    print('%d  LR %.1f %%  Livox %d  stereo/LiDAR Z %.3f  oracle %d  pred %d'
-          % (i, 100 * ok.mean(), len(p), ratio, mask_oracle.max(), mask_pred.max()))
+    print('%d  LR %.1f %%  Livox %d  oracle %d  pred %d'
+          % (i, 100 * ok.mean(), len(p), mask_oracle.max(), mask_pred.max()))
     cv2.imwrite(str(d / 'left_rect.png'), L)
     cv2.imwrite(str(d / 'mask_pred.png'), mask_pred)
-    np.save(d / 'disp.npy', disp)
+
+    chk = L.copy()
+    chk[mask_pred > 0] = L[mask_pred > 0] // 2 + np.uint8([0, 110, 0])
+    edge = cv2.findContours(np.uint8(mask_oracle > 0), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[0]
+    cv2.drawContours(chk, edge, -1, (0, 0, 255), 1)
+    disp_8 = np.clip(np.nan_to_num(disp) * 3, 0, 255).astype(np.uint8)
+    disp_c = cv2.applyColorMap(disp_8, cv2.COLORMAP_TURBO)
+    cv2.imwrite(str(d / 'check.png'), np.vstack([chk, disp_c]))
