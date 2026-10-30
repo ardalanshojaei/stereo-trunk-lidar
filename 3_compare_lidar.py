@@ -44,15 +44,15 @@ gt, e_d = {}, []
 for fd in sorted(FR.glob('[0-9]*')):
     disp, P, u, v, e = project(fd)
     e_d.append(e)
-    m_o = cv2.dilate(cv2.imread(str(fd / 'mask_oracle.png'), cv2.IMREAD_UNCHANGED), np.ones((1, 9), np.uint8))
+    # Livox is 0.15 m right of the camera, background past a trunk's right edge lands in the mask
+    m_o = cv2.erode(cv2.imread(str(fd / 'mask_oracle.png'), cv2.IMREAD_UNCHANGED), np.ones((7, 7), np.uint8))
     for k in range(1, m_o.max() + 1):
         s = P[m_o[v, u] == k]
         s = s[np.argsort(s[:, 2])]
-        # depth groups split at gaps of 0.3 m, keep the nearest one with 8 points or more
+        # depth groups split at gaps of 0.3 m, keep the largest
         groups = np.split(s, np.flatnonzero(np.diff(s[:, 2]) > 0.3) + 1)
-        groups = [g for g in groups if len(g) >= 8]
-        if groups:
-            g = groups[0]
+        g = max(groups, key=len)
+        if len(g) >= 8:
             p, cov = circle_fit(g[:, 0], g[:, 2])
             gt[(int(fd.name), k)] = (p, cov, g)
 e_d = np.concatenate(e_d)
