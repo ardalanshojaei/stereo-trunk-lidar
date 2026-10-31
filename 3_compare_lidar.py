@@ -1,15 +1,17 @@
 import numpy as np
 import cv2
+import matplotlib.pyplot as plt
 from pathlib import Path
 
 OUT = Path('results')
 FR = Path('frames')
+VIEW = 48  # frame for the bird's eye view
 bins = [0, 5, 10, 15, 30]
 
 with open(OUT / 'trunks.csv') as f:
     names = f.readline().lstrip('# ').strip().split(',')
 T = dict(zip(names, np.loadtxt(OUT / 'trunks.csv', delimiter=',').T))
-cal = np.load(FR / '0048' / 'calib.npz')
+cal = np.load(FR / f'{VIEW:04d}' / 'calib.npz')
 f_x, c_x, c_y, B = float(cal['f_x']), float(cal['c_x']), float(cal['c_y']), float(cal['B'])
 fB = f_x * B
 
@@ -86,9 +88,69 @@ pull = (dZ['C'] / np.hypot(s_pred, s_GT))[ora]
 
 lines.append('LiDAR truth: %d oracle trunks with >= 8 points, %d pass radius and fit checks' % (len(gt), len(ok_gt)))
 lines.append('YOLO covers %d of %d oracle trunks with truth' % (len({keys[i] for i in np.nonzero(prd)[0]}), ora.sum()))
-for i in np.nonzero(ora)[0]:
-    lines.append('%4d-%d  Z_L %5.2f  r_L %.3f  dZ A %+6.2f  B %+6.2f  C %+6.2f  dX C %+5.2f' % (
-        T['frame'][i], T['k'][i], Z_L[i], r_L[i], dZ['A'][i], dZ['B'][i], dZ['C'][i], dX['C'][i]))
-lines.append('C oracle: median dZ %+.2f m, pull mean %+.1f std %.1f n %d' % (
-    np.median(dZ['C'][ora]), pull.mean(), pull.std(), len(pull)))
+lines.append('mask   est  Z bin     n  med dZ  RMSE dZ  robust  med dX  RMSE dX  B radius off by > r/2')
+for src, name in ((ora, 'oracle'), (prd, 'yolo')):
+    for e in est:
+        for lo, hi in zip(bins, bins[1:]):
+            s = src & (Z_L >= lo) & (Z_L < hi)
+            if not s.any():
+                continue
+            b_off = ''
+            if e == 'B':
+                b_off = '%d of %d' % (np.sum(np.abs(T['r_B'][s] - r_L[s]) > r_L[s] / 2), s.sum())
+            lines.append('%-6s %s  %2d-%2d  %4d  %+6.2f  %6.2f  %6.2f  %+6.2f  %6.2f   %s' % (
+                name, e, lo, hi, s.sum(), np.median(dZ[e][s]), rms(dZ[e][s]), robust(dZ[e][s])[1],
+                np.median(dX[e][s]), rms(dX[e][s]), b_off))
+s_d_eff = robust(dZ['C'][ora] * fB / Z_L[ora] ** 2)[1]
+lines.append('C oracle: robust spread of dZ fB/Z^2 %.2f px, pull mean %+.1f std %.1f median %+.1f n %d' % (
+    s_d_eff, pull.mean(), pull.std(), np.median(pull), len(pull)))
 print('\n'.join(lines))
+open(OUT / 'table.txt', 'w').write('\n'.join(lines) + '\n')
+
+z = np.linspace(2, 17, 100)
+band = z ** 2 * s_d_eff / fB
+fig, ax = plt.subplots(1, 3, figsize=(17, 4.8), layout='tight')
+for a, err, label in ((ax[0], dZ, 'dZ = stereo - LiDAR [m]'), (ax[1], dX, 'dX = stereo - LiDAR [m]')):
+    a.fill_between(z, -2 * band, 2 * band, color='0.9', lw=0)
+    a.fill_between(z, -band, band, color='0.78', lw=0)
+    a.plot(Z_L[ora], err['A'][ora], 'o', mfc='none', label='A oracle')
+    a.plot(Z_L[ora], err['C'][ora], '+', label='C oracle')
+    a.plot(Z_L[prd], err['C'][prd], 'x', label='C YOLO')
+    a.set(xlabel='LiDAR Z [m]', ylabel=label, ylim=(-2.5, 1))
+ax[0].legend(loc='lower left')
+ax[0].set_title('bands: 1 and 2 x %.2f px of disparity, scaled by Z^2/fB' % s_d_eff, fontsize=9)
+ax[2].hist(np.clip(pull, -10, 10), bins=np.arange(-10, 10.1, 0.5), density=True, alpha=0.6,
+           label='mean %+.1f std %.1f n %d' % (pull.mean(), pull.std(), len(pull)))
+x = np.linspace(-4, 4, 200)
+ax[2].plot(x, np.exp(-x ** 2 / 2) / np.sqrt(2 * np.pi), 'k')
+ax[2].legend(fontsize=8, title='pull dZ / sigma, C oracle, clipped at 10', title_fontsize=8)
+fig.savefig(OUT / 'error_vs_range.png', dpi=110)
+
+disp, P, _, _, _ = project(FR / f'{VIEW:04d}')
+mask = cv2.imread(str(FR / f'{VIEW:04d}' / 'clean_oracle.png'), cv2.IMREAD_UNCHANGED)
+s_d = np.median(T['s_d'][ora])
+t = np.linspace(0, 2 * np.pi, 50)
+fig, a = plt.subplots(figsize=(8, 8))
+near = np.abs(P[:, 1]) < 1.5
+a.plot(P[near, 0], P[near, 2], '.', ms=1, color='0.7')
+u = np.nonzero(mask == 1)[1]
+d = disp[mask == 1]
+a.plot((u - c_x) * B / d, fB / d, '.', ms=1)
+circle = np.vstack([np.cos(t), np.sin(t)])
+for i in np.linspace(0, len(d) - 1, 6).astype(int):
+    X_i = (u[i] - c_x) * B / d[i]
+    Z_i = fB / d[i]
+    J = np.array([[B / d[i], -(u[i] - c_x) * B / d[i] ** 2], [0, -fB / d[i] ** 2]])
+    w, V = np.linalg.eigh(J @ np.diag([0.5 ** 2, s_d ** 2]) @ J.T)
+    ell = V @ (2 * np.sqrt(w)[:, None] * circle)  # (2, 50) 2 sigma ellipse
+    a.plot(X_i + ell[0], Z_i + ell[1], lw=0.6)
+p_g, _, g = ok_gt[(VIEW, 1)]
+X_g, Z_g, r_g = p_g
+a.add_patch(plt.Circle((X_g, Z_g), r_g, fill=False, color='k'))
+a.plot(g[:, 0], g[:, 2], 'k.', ms=3)
+i = (T['frame'] == VIEW) & (T['src'] == 0) & (T['k'] == 1)
+for e, mk in (('A', 'o'), ('B', 'x'), ('C', '+')):
+    a.plot(T['X_' + e][i], T['Z_' + e][i], mk, color='r', mfc='none', ms=8)
+a.set(xlabel='X [m]', ylabel='Z [m]', aspect='equal', xlim=(X_g - 0.6, X_g + 0.6), ylim=(Z_g - 0.8, Z_g + 0.4))
+a.set_title('frame %d trunk 1: Livox (black: circle fit), stereo, 2 sigma ellipses, A o B x C +' % VIEW, fontsize=9)
+fig.savefig(OUT / f'birds_eye_{VIEW:04d}.png', dpi=110)
