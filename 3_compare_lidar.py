@@ -6,6 +6,7 @@ from pathlib import Path
 OUT = Path('results')
 FR = Path('frames')
 VIEW = 48  # frame for the bird's eye view
+OCCLUDED = (168, 3)  # frame, trunk: the LiDAR picks up an object in front of it
 bins = [0, 5, 10, 15, 30]
 
 with open(OUT / 'trunks.csv') as f:
@@ -59,10 +60,35 @@ for fd in sorted(FR.glob('[0-9]*')):
             gt[(int(fd.name), k)] = (p, cov, g)
 e_d = np.concatenate(e_d)
 
+held = sorted((FR / 'heldout').glob('*'))
+H = []
+for fd in held:
+    _, _, _, _, e = project(fd)
+    H.append(e)
+H = np.concatenate(H)
+H = H[(H[:, 1] < fB / 3) & (np.abs(H[:, 2]) < 3)]
+A_h = np.column_stack([np.ones(len(H)), H[:, 0], H[:, 1]])
+w = np.ones(len(H))
+for _ in range(10):
+    k_d = np.linalg.lstsq(A_h * w[:, None], H[:, 2] * w, rcond=None)[0]
+    w = 1 / np.maximum(np.abs(H[:, 2] - A_h @ k_d), 0.3)
+
 lines = ['calibration check, every Livox point against SGBM, d_stereo - fB/Z_lidar [px], median and robust std']
 for lo in range(80, 880, 160):
     s = (e_d[:, 1] < fB / 5) & (e_d[:, 0] + c_x >= lo) & (e_d[:, 0] + c_x < lo + 160)
     lines.append('  Z > 5 m, columns %3d-%3d  %+.3f  %.3f' % ((lo, lo + 160) + robust(e_d[s, 2])))
+lines.append('held-out fit, %d frames, %d points: d_stereo - d_lidar = %+.3f %+.5f (u - c_x) %+.4f d_lidar'
+             % (len(held), len(H), *k_d))
+
+# corrected disparity (d - a - b (u - c_x)) / (1 + c), applied to the median disparity of each trunk
+a, b, c = k_d
+u_c = f_x * T['X_A'] / T['Z_A'] + c_x
+Z_s = fB * (1 + c) / (fB / T['Z_s'] - a - b * (u_c - c_x))
+shift = Z_s - T['Z_s']
+for e in ['A', 'B', 'C']:
+    Z_new = T['Z_' + e] + shift
+    T['X_' + e + '*'] = T['X_' + e] * Z_new / T['Z_' + e]
+    T['Z_' + e + '*'] = Z_new
 
 ok_gt = {}
 for key, (p, cov, g) in gt.items():
@@ -78,17 +104,19 @@ for i, key in enumerate(keys):
         p, cov, _ = ok_gt[key]
         X_L[i], Z_L[i], r_L[i] = p
         s_GT[i] = np.sqrt(cov[1, 1])
-est = ['A', 'B', 'C']
+est = ['A', 'B', 'C', 'A*', 'B*', 'C*']
 dZ = {e: T['Z_' + e] - Z_L for e in est}
 dX = {e: T['X_' + e] - X_L for e in est}
 s_pred = np.sqrt(T['var_Z'] * T['N'] / T['N_eff'] + (T['Z_s'] / (2 * f_x)) ** 2)
 ora = np.isfinite(Z_L) & (T['src'] == 0)
 prd = np.isfinite(Z_L) & (T['src'] == 1)
-pull = (dZ['C'] / np.hypot(s_pred, s_GT))[ora]
+pull = {e: (dZ[e] / np.hypot(s_pred, s_GT))[ora] for e in ('C', 'C*')}
+clean = np.array([key != OCCLUDED for key in keys])
 
 lines.append('LiDAR truth: %d oracle trunks with >= 8 points, %d pass radius and fit checks' % (len(gt), len(ok_gt)))
 lines.append('YOLO covers %d of %d oracle trunks with truth' % (len({keys[i] for i in np.nonzero(prd)[0]}), ora.sum()))
-lines.append('mask   est  Z bin     n  med dZ  RMSE dZ  robust  med dX  RMSE dX  B radius off by > r/2')
+lines.append('* = held-out disparity correction; RMSE* without frame %d trunk %d (object in front)' % OCCLUDED)
+lines.append('mask   est  Z bin     n  med dZ  RMSE dZ  RMSE*  robust  med dX  RMSE dX  B radius off by > r/2')
 for src, name in ((ora, 'oracle'), (prd, 'yolo')):
     for e in est:
         for lo, hi in zip(bins, bins[1:]):
@@ -98,29 +126,33 @@ for src, name in ((ora, 'oracle'), (prd, 'yolo')):
             b_off = ''
             if e == 'B':
                 b_off = '%d of %d' % (np.sum(np.abs(T['r_B'][s] - r_L[s]) > r_L[s] / 2), s.sum())
-            lines.append('%-6s %s  %2d-%2d  %4d  %+6.2f  %6.2f  %6.2f  %+6.2f  %6.2f   %s' % (
-                name, e, lo, hi, s.sum(), np.median(dZ[e][s]), rms(dZ[e][s]), robust(dZ[e][s])[1],
-                np.median(dX[e][s]), rms(dX[e][s]), b_off))
-s_d_eff = robust(dZ['C'][ora] * fB / Z_L[ora] ** 2)[1]
-lines.append('C oracle: robust spread of dZ fB/Z^2 %.2f px, pull mean %+.1f std %.1f median %+.1f n %d' % (
-    s_d_eff, pull.mean(), pull.std(), np.median(pull), len(pull)))
+            lines.append('%-6s %-2s  %2d-%2d  %4d  %+6.2f  %6.2f  %6.2f  %6.2f  %+6.2f  %6.2f   %s' % (
+                name, e, lo, hi, s.sum(), np.median(dZ[e][s]), rms(dZ[e][s]), rms(dZ[e][s & clean]),
+                robust(dZ[e][s])[1], np.median(dX[e][s]), rms(dX[e][s]), b_off))
+s_d_eff = {}
+for e in ['C', 'C*']:
+    s_d_eff[e] = robust(dZ[e][ora] * fB / Z_L[ora] ** 2)[1]
+    p_e = pull[e]
+    lines.append(f'{e:<3} oracle: robust spread of dZ fB/Z^2 {s_d_eff[e]:.2f} px, pull mean {p_e.mean():+.1f} '
+                 f'std {p_e.std():.1f} median {np.median(p_e):+.1f} n {len(p_e)}')
 print('\n'.join(lines))
 open(OUT / 'table.txt', 'w').write('\n'.join(lines) + '\n')
 
 z = np.linspace(2, 17, 100)
-band = z ** 2 * s_d_eff / fB
+band = z ** 2 * s_d_eff['C*'] / fB
 fig, ax = plt.subplots(1, 3, figsize=(17, 4.8), layout='tight')
 for a, err, label in ((ax[0], dZ, 'dZ = stereo - LiDAR [m]'), (ax[1], dX, 'dX = stereo - LiDAR [m]')):
     a.fill_between(z, -2 * band, 2 * band, color='0.9', lw=0)
     a.fill_between(z, -band, band, color='0.78', lw=0)
-    a.plot(Z_L[ora], err['A'][ora], 'o', mfc='none', label='A oracle')
     a.plot(Z_L[ora], err['C'][ora], '+', label='C oracle')
+    a.plot(Z_L[ora], err['C*'][ora], 'o', mfc='none', label='C* oracle')
     a.plot(Z_L[prd], err['C'][prd], 'x', label='C YOLO')
     a.set(xlabel='LiDAR Z [m]', ylabel=label, ylim=(-2.5, 1))
 ax[0].legend(loc='lower left')
-ax[0].set_title('bands: 1 and 2 x %.2f px of disparity, scaled by Z^2/fB' % s_d_eff, fontsize=9)
-ax[2].hist(np.clip(pull, -10, 10), bins=np.arange(-10, 10.1, 0.5), density=True, alpha=0.6,
-           label='mean %+.1f std %.1f n %d' % (pull.mean(), pull.std(), len(pull)))
+ax[0].set_title('bands: 1 and 2 x %.2f px (corrected spread), scaled by Z^2/fB' % s_d_eff['C*'], fontsize=9)
+for e, label in (('C', 'published'), ('C*', 'corrected')):
+    ax[2].hist(np.clip(pull[e], -10, 10), bins=np.arange(-10, 10.1, 0.5), density=True, alpha=0.5,
+               label='%s: mean %+.1f std %.1f' % (label, pull[e].mean(), pull[e].std()))
 x = np.linspace(-4, 4, 200)
 ax[2].plot(x, np.exp(-x ** 2 / 2) / np.sqrt(2 * np.pi), 'k')
 ax[2].legend(fontsize=8, title='pull dZ / sigma, C oracle, clipped at 10', title_fontsize=8)

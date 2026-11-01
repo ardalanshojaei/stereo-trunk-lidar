@@ -10,6 +10,12 @@ BAG = Path('data/bgarden/1018_00_VLIO.bag')
 CAL = 'data/bgarden/calib/'
 OUT = Path('frames')
 FRAMES = [24, 48, 72, 120, 144, 168, 192, 208, 228, 248, 300, 324, 348, 372, 396, 420, 444, 912, 940]
+# every 4th frame on the three trunk paths, at least 8 frames from any evaluation frame
+HELD = []
+for i in range(24, 961, 4):
+    on_path = i < 268 or 288 <= i < 460 or i > 884
+    if on_path and min(abs(i - j) for j in FRAMES) >= 8:
+        HELD.append(i)
 n_d, w_b, tol_lr = 80, 5, 1.0  # SGBM disparities, block size, left-right tolerance [px]
 wh = (960, 600)
 
@@ -55,7 +61,7 @@ with AnyReader([BAG]) as rd:
             odo.append((stamp(m), m.twist.twist.linear.x, m.twist.twist.angular.z))
         else:
             t_img.append(stamp(m))
-    want = [t_img[i] for i in FRAMES]
+    want = [t_img[i] for i in FRAMES + HELD]
     topics = ['/dalsa_color/left/image_raw', '/dalsa_color/right/image_raw', '/livox/lidar']
     for c, t, raw in rd.messages(connections=[con[name] for name in topics]):
         if c.topic == '/livox/lidar' and np.abs(np.array(want) - 1e-9 * t).min() > 1:
@@ -90,8 +96,11 @@ sgbm = cv2.StereoSGBM_create(minDisparity=0, numDisparities=n_d, blockSize=w_b, 
                              mode=cv2.STEREO_SGBM_MODE_HH)
 yolo = YOLO('data/yolo/trunk.pt')
 v, u = np.mgrid[0:wh[1], 0:wh[0]]
-for i, st in zip(FRAMES, want):
-    d = OUT / f'{i:04d}'
+for i, st in zip(FRAMES + HELD, want):
+    if i in HELD:
+        d = OUT / 'heldout' / f'{i:04d}'
+    else:
+        d = OUT / f'{i:04d}'
     d.mkdir(parents=True, exist_ok=True)
     L = cv2.remap(img[('left', st)], *map_l, cv2.INTER_LINEAR)
     R = cv2.remap(img[('right', st)], *map_r, cv2.INTER_LINEAR)
@@ -116,6 +125,8 @@ for i, st in zip(FRAMES, want):
     np.save(d / 'disp.npy', disp)
     np.save(d / 'pts_cam.npy', pts_cam.astype(np.float32))
     np.savez(d / 'calib.npz', f_x=f_x, c_x=c_x, c_y=c_y, B=B, w_b=w_b, R1=R1, T_cl=T_cl, stamp=st, v_x=v_x, w_z=w_z)
+    if i in HELD:
+        continue
 
     if not (d / 'mask_oracle.png').exists():
         cv2.imwrite(str(d / 'mask_oracle.png'), draw_polygons(L[:, :, ::-1]))
