@@ -20,8 +20,8 @@ On synthetic data whose noise follows the model, the spread of estimator C is wi
 from 3 to 15 m. On the real frames the predicted sigma of a trunk center is about 2 cm while the errors are
 decimeters, so beyond 5 m the error is dominated by systematic error rather than by matching noise.
 
-Detection is the weak part. A YOLO model trained on Finnish forest images finds 18 of the 56 trunks with ground
-truth. Where it finds one, the position is as good as with the oracle mask.
+A YOLO model trained on Finnish forest images finds only 18 of the 56 trunks with ground truth, but where it
+finds one the position is as good as with the oracle mask.
 
 ## Data
 
@@ -81,7 +81,8 @@ figures.
 
 Each trunk has two masks. The oracle mask is a vertical band on the stem. Each band is seeded on a straight,
 unoccluded stem segment, and its left and right sides are snapped to the bark edges from the image gradient (80
-trunks kept across 19 frames after dropping forked or border-clipped stems). Because the band fixes a row range, the stereo pixels and the
+trunks kept across 19 frames after dropping forked or border-clipped stems). Because the band fixes a row range,
+the stereo pixels and the
 LiDAR slice cover the same piece of stem, and a leaning trunk does not shift one against the other. The predicted
 masks come from YOLO11n-seg trained on FinnWoodlands (80 epochs, mask mAP50 0.75 on its validation set).
 
@@ -119,7 +120,7 @@ disparity noise the median depth is median-unbiased, while the mean depth is bia
 Estimator B fits a free-radius RANSAC circle to the back-projected pixels. The arc only shows its curvature
 through the sagitta $h = r(1 - \sqrt{1 - a^2})$, so once the per-pixel $\sigma_Z$ exceeds h the radius becomes
 poorly observable. For r = 0.15 m, a = 0.8 and $\sigma_d$ = 0.5 px that is at about 4.5 m. Averaging over many
-pixels delays the failure: in the synthetic test the radius is off by more than half in every run from 10 m on.
+pixels delays this, and in the synthetic test the radius is off by more than half in every run from 10 m on.
 I keep B in the comparison to show where this breakdown occurs.
 
 ### Estimator C
@@ -131,11 +132,11 @@ $\hat d_i = f_x B / Z_{hit}$ and
 $$\mathcal{L}(c) = \sum_i \frac{(d_i - \hat d_i(c))^2}{w_i}, \qquad w_i = \sigma_d^2 + \left(\frac{\partial \hat d_i}{\partial u}\right)^2 \sigma_u^2,
 \qquad F = \sum_i \frac{G_i^\top G_i}{w_i}, \qquad \mathrm{Cov}(\hat c) \succeq F^{-1}$$
 
-with $G_i = \partial \hat d_i / \partial c$. The weight $w_i$ is $\Sigma_{XZ}$ expressed in disparity. Here
-$\sigma_u$ = 0.5 px stands for the uncertainty in which part of the bark a pixel's matching window sees. It only
+with $G_i = \partial \hat d_i / \partial c$. The weight $w_i$ is $\Sigma_{XZ}$ expressed in disparity. I set
+$\sigma_u$ = 0.5 px because the matching window does not say exactly which part of the bark a pixel sees. It only
 matters near the trunk edges, where $\hat d$ changes quickly with u. For independent Gaussian noise $F^{-1}$ is the
 Cramér-Rao bound on an unbiased estimate of c. The radius comes from A and is treated as exact, so the bound is
-conditional on r and somewhat optimistic.
+conditional on r and a bit optimistic.
 
 Levenberg-Marquardt starts from A, and $\sigma_d$ is re-estimated from the residuals of each trunk. A step is
 accepted only if the weighted cost goes down and no more rays miss the circle. A ray that misses gets the depth of
@@ -152,8 +153,8 @@ fit pulls the center towards the camera. Fitting in disparity, where the noise a
 SGBM neighbors share their matching window and their aggregation paths, so N pixels carry far less information
 than N independent measurements. I remove the per-column median residual, compute the residual autocorrelation
 $\rho$ by FFT over lags up to +/-10 px, and use $N_{eff} = N / \sum \rho$. The predicted spread of C is
-$F^{-1} N / N_{eff}$, plus one pixel of width in the radius. This is an approximation, not a Cramér-Rao bound: it
-treats the correlation as a loss of sample size. On the real trunks N/N_eff has a median of 128.
+$F^{-1} N / N_{eff}$, plus one pixel of width in the radius. This is not a Cramér-Rao bound. It treats the
+correlation as a loss of sample size. On the real trunks N/N_eff has a median of 128.
 
 ### Synthetic test
 
@@ -246,7 +247,7 @@ ellipses.
 
 The pulls of C have mean -11.7 and std 33.5 with the published calibration, and mean -1.4 and std 29.7 with the
 correction. The correction removes most of the shift but not the width. The predicted sigma of a trunk center has
-a median of 1.9 cm, of which the bound $F^{-1}$ alone gives 1.6 mm; the rest is the correlation of the pixels. The
+a median of 1.9 cm, of which the bound $F^{-1}$ alone gives 1.6 mm. The rest comes from the correlation between pixels. The
 remaining errors are still decimeters at long range, so a three-parameter model does not capture all of the
 systematic error, and the noise model by design says nothing about bias.
 

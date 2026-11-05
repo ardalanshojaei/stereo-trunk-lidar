@@ -97,8 +97,7 @@ def estimate(disp, m0, f_x, c_x, B, e):
             g = Gw.T @ (d - d0)[ok]
             chi2 = np.sum((d - d0)[ok] ** 2 / w_d[ok])
             n_hit = ray_hit(u, c[0], c[1], r, f_x, c_x)[1].sum()
-            # Levenberg-Marquardt: raise the damping until the weighted cost goes down, and never let more rays
-            # miss the circle, since a missed ray's closest approach lets a far circle mimic a tilted plane
+            # LM, a step must lower the cost and not lose rays off the circle
             step = np.zeros(2)
             while lam < 1e10:
                 trial = np.linalg.solve(F_info + lam * np.diag(np.diag(F_info)), g)
@@ -136,7 +135,7 @@ for Z_c in (3, 5, 8, 10, 15):
         disp0[rows_t] = np.where(hit, f_x * B / Z_t, np.nan)
         runs = []
         for _ in range(n_mc):
-            # each pixel sees the surface at a column off by sigma_u, as the weights assume
+            # column jitter s_u, (rows, 960)
             u_j = np.arange(960) + rng.normal(0, s_u, disp0[rows_t].shape)
             disp_j = disp0.copy()
             disp_j[rows_t] = np.where(np.isfinite(disp0[rows_t]), f_x * B / ray_hit(u_j, 0.2 * Z_c, Z_c, 0.15, f_x,
