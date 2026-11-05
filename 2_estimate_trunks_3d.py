@@ -84,7 +84,8 @@ def estimate(disp, m0, f_x, c_x, B, e):
     c = np.array([X_A, Z_A])
     s_dc = max(s_d, 0.25)
     for _ in range(2):
-        for _ in range(6):
+        lam = 1e-3
+        for _ in range(100):
             d0 = d_mod(c)
             dd_dX = (d_mod(c + [1e-4, 0]) - d0) / 1e-4
             dd_dZ = (d_mod(c + [0, 1e-4]) - d0) / 1e-4
@@ -93,10 +94,23 @@ def estimate(disp, m0, f_x, c_x, B, e):
             ok = np.isfinite(d0) & np.isfinite(G).all(1) & np.isfinite(w_d)
             Gw = G[ok] / w_d[ok, None]
             F_info = Gw.T @ G[ok]
-            step = np.linalg.lstsq(F_info, Gw.T @ (d - d0)[ok], rcond=None)[0]
-            # cap the step at r/2, a bad start can otherwise jump off the arc
-            scale = min(1, 0.5 * r / np.hypot(*step))
-            c = c + step * scale
+            g = Gw.T @ (d - d0)[ok]
+            chi2 = np.sum((d - d0)[ok] ** 2 / w_d[ok])
+            n_hit = ray_hit(u, c[0], c[1], r, f_x, c_x)[1].sum()
+            # Levenberg-Marquardt: raise the damping until the weighted cost goes down, and never let more rays
+            # miss the circle, since a missed ray's closest approach lets a far circle mimic a tilted plane
+            step = np.zeros(2)
+            while lam < 1e10:
+                trial = np.linalg.solve(F_info + lam * np.diag(np.diag(F_info)), g)
+                hit_t = ray_hit(u, *(c + trial), r, f_x, c_x)[1].sum()
+                if np.nansum((d - d_mod(c + trial))[ok] ** 2 / w_d[ok]) < chi2 and hit_t >= n_hit:
+                    step = trial
+                    break
+                lam *= 10
+            c = c + step
+            lam = max(lam / 10, 1e-6)
+            if np.hypot(*step) < 1e-4:
+                break
         eps = np.full(disp.shape, np.nan)
         eps[v, u] = d - d_mod(c)
         s_dc = 1.4826 * np.nanmedian(np.abs(eps[v, u] - np.nanmedian(eps[v, u])))
@@ -110,27 +124,36 @@ def estimate(disp, m0, f_x, c_x, B, e):
     return m, res
 
 f_x, c_x, B, e = 655.3, 462.9, 0.2537, 3
-print('synthetic cylinder, r = 0.15 m, sigma_d = 0.5 px, %d runs per row' % n_mc)
-print(' Z_c  noise   bias A  bias C   std C   CRLB  CRLB*sqrt(N/Neff)  std/that  N/Neff  B: |r_B-r|>r/2  median r_B')
+print('synthetic cylinder, r = 0.15 m, sigma_d = 0.5 px, sigma_u = %.1f px, %d runs per row' % (s_u, n_mc))
+print('std, CRLB and pred in mm; pred = CRLB sqrt(N/N_eff)')
+print(' Z_c  noise   bias A  bias C   std C    CRLB    pred  std/CRLB  std/pred  N/Neff  conv  '
+      'B: |r_B-r|>r/2  median r_B')
 for Z_c in (3, 5, 8, 10, 15):
     for corr in (0, 1):
+        rows_t = slice(200, 200 + int(f_x * 0.8 / Z_c))
         Z_t, hit = ray_hit(np.arange(960), 0.2 * Z_c, Z_c, 0.15, f_x, c_x)
         disp0 = np.full((600, 960), np.nan)
-        disp0[200:200 + int(f_x * 0.8 / Z_c)] = np.where(hit, f_x * B / Z_t, np.nan)
+        disp0[rows_t] = np.where(hit, f_x * B / Z_t, np.nan)
         runs = []
         for _ in range(n_mc):
+            # each pixel sees the surface at a column off by sigma_u, as the weights assume
+            u_j = np.arange(960) + rng.normal(0, s_u, disp0[rows_t].shape)
+            disp_j = disp0.copy()
+            disp_j[rows_t] = np.where(np.isfinite(disp0[rows_t]), f_x * B / ray_hit(u_j, 0.2 * Z_c, Z_c, 0.15, f_x,
+                                                                                      c_x)[0], np.nan)
             noise = rng.normal(0, 0.5, disp0.shape)
             if corr:
                 noise = cv2.blur(noise, (5, 5)) * 5
-            runs.append(estimate(disp0 + noise, np.isfinite(disp0), f_x, c_x, B, e)[1])
+            runs.append(estimate(disp_j + noise, np.isfinite(disp0), f_x, c_x, B, e)[1])
         N, N_eff = column(runs, 'N'), column(runs, 'N_eff')
         Z_A, Z_C = column(runs, 'Z_A'), column(runs, 'Z_C')
         r_B, var_Z = column(runs, 'r_B'), column(runs, 'var_Z')
-        s_pred = np.sqrt(var_Z * N / N_eff)
-        print('%4.0f  %-6s %+7.3f %+7.3f %7.3f %6.3f %10.3f %13.2f %8.1f %10.2f %12.3f' % (
-            Z_c, ('white', 'box5')[corr], np.mean(Z_A - Z_c), np.mean(Z_C - Z_c), np.std(Z_C),
-            np.mean(np.sqrt(var_Z)), np.mean(s_pred), np.std(Z_C) / np.mean(s_pred), np.mean(N / N_eff),
-            np.mean(np.abs(r_B - 0.15) > 0.075), np.median(r_B)))
+        s_crlb = np.mean(np.sqrt(var_Z))
+        s_pred = np.mean(np.sqrt(var_Z * N / N_eff))
+        print('%4.0f  %-6s %+7.3f %+7.3f %7.1f %7.1f %7.1f %9.2f %9.2f %7.1f %5.0f%% %10.2f %14.3f' % (
+            Z_c, ('white', 'box5')[corr], np.mean(Z_A - Z_c), np.mean(Z_C - Z_c), 1e3 * np.std(Z_C),
+            1e3 * s_crlb, 1e3 * s_pred, np.std(Z_C) / s_crlb, np.std(Z_C) / s_pred, np.mean(N / N_eff),
+            100 * np.mean(column(runs, 'last_step') < 1e-4), np.mean(np.abs(r_B - 0.15) > 0.075), np.median(r_B)))
 
 rows = []
 for fd in FRAMES:
@@ -164,3 +187,5 @@ header = ('frame,src,k,oracle_k,cover,N,N_eff,s_d,Z_s,X_A,Z_A,r_A,X_B,Z_B,r_B,'
           'X_C,Z_C,var_X,var_Z,cov_XZ,last_step,v_min,v_max')
 np.savetxt(OUT / 'trunks.csv', np.array(rows), delimiter=',', fmt='%.6g', header=header)
 print('%d trunk estimates written to %s' % (len(rows), OUT / 'trunks.csv'))
+steps = np.array([row[header.split(',').index('last_step')] for row in rows])
+print('C converged (last step < 0.1 mm) on %d of %d' % ((steps < 1e-4).sum(), len(rows)))

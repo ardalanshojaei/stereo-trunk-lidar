@@ -39,8 +39,11 @@ def project(fd):
     v = np.round(f_x * P[:, 1] / P[:, 2] + c_y).astype(int)
     on = (u >= 0) & (u < disp.shape[1]) & (v >= 0) & (v < disp.shape[0])
     P, u, v = P[on], u[on], v[on]
-    # (M, 3) columns: u - c_x, LiDAR disparity fB / Z, stereo minus LiDAR disparity; Z < 20 m
-    e = np.column_stack([u - c_x, fB / P[:, 2], disp[v, u] - fB / P[:, 2]])
+    # smooth surface: stereo disparity spans less than 1 px over the 9x9 window around the pixel
+    d_hi = cv2.dilate(np.nan_to_num(disp, nan=-100), np.ones((9, 9)))
+    d_lo = -cv2.dilate(-np.nan_to_num(disp, nan=-100), np.ones((9, 9)))
+    # (M, 4) columns: u - c_x, LiDAR disparity fB / Z, stereo minus LiDAR disparity, smooth; Z < 20 m
+    e = np.column_stack([u - c_x, fB / P[:, 2], disp[v, u] - fB / P[:, 2], (d_hi - d_lo)[v, u] < 1])
     return disp, P, u, v, e[np.isfinite(e[:, 2]) & (e[:, 1] > fB / 20)]
 
 gt, e_d = {}, []
@@ -76,7 +79,9 @@ for _ in range(10):
 lines = ['calibration check, every Livox point against SGBM, d_stereo - fB/Z_lidar [px], median and robust std']
 for lo in range(80, 880, 160):
     s = (e_d[:, 1] < fB / 5) & (e_d[:, 0] + c_x >= lo) & (e_d[:, 0] + c_x < lo + 160)
-    lines.append('  Z > 5 m, columns %3d-%3d  %+.3f  %.3f' % ((lo, lo + 160) + robust(e_d[s, 2])))
+    f = s & (e_d[:, 3] > 0)
+    lines.append('  Z > 5 m, columns %3d-%3d  %+.3f  %.3f   smooth surfaces only %+.3f  %.3f' % (
+        (lo, lo + 160) + robust(e_d[s, 2]) + robust(e_d[f, 2])))
 lines.append('held-out fit, %d frames, %d points: d_stereo - d_lidar = %+.3f %+.5f (u - c_x) %+.4f d_lidar'
              % (len(held), len(H), *k_d))
 
@@ -114,6 +119,11 @@ pull = {e: (dZ[e] / np.hypot(s_pred, s_GT))[ora] for e in ('C', 'C*')}
 clean = np.array([key != OCCLUDED for key in keys])
 
 lines.append('LiDAR truth: %d oracle trunks with >= 8 points, %d pass radius and fit checks' % (len(gt), len(ok_gt)))
+lines.append('LiDAR center sigma Z median %.3f m, p90 %.3f m; median LiDAR radius per Z bin %s m' % (
+    np.median(s_GT[ora]), np.percentile(s_GT[ora], 90),
+    ' '.join('%.3f' % np.median(r_L[ora & (Z_L >= lo) & (Z_L < hi)]) for lo, hi in zip(bins, bins[1:]))))
+lines.append('C oracle: predicted sigma Z median %.3f m, of which the bound F^-1 alone %.4f m' % (
+    np.median(s_pred[ora]), np.median(np.sqrt(T['var_Z'][ora]))))
 lines.append('YOLO covers %d of %d oracle trunks with truth' % (len({keys[i] for i in np.nonzero(prd)[0]}), ora.sum()))
 lines.append('* = held-out disparity correction; RMSE* without frame %d trunk %d (object in front)' % OCCLUDED)
 lines.append('mask   est  Z bin     n  med dZ  RMSE dZ  RMSE*  robust  med dX  RMSE dX  B radius off by > r/2')
